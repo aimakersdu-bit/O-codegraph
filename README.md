@@ -632,6 +632,106 @@ is written):
 
 **Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `codegraph sync` manually if needed. Check that the file's language is supported and isn't inside a `.gitignore`d or default-excluded directory (e.g. `node_modules`, `dist`).
 
+## Centralized Service Deployment (中心化服务部署指南)
+
+CodeGraph can be run as a centralized service, storing the code intelligence graph in a centralized MySQL database. This is ideal for team environments and CI/CD pipelines:
+- **Scan on CI**: Automatically extract nodes and upload the graph on every build/merge.
+- **Central MySQL Backend**: Scales to handle large codebases and multiple repositories/branches.
+- **Atomic Pointer Switching**: Implements A/B version pointer switching to prevent downtime during updates.
+- **Auto Cleanup**: Keeps only the most recent 7 versions of each repo/branch in the database to control storage footprint.
+- **Unified MCP Server**: Access all code graphs via a single centralized MCP server.
+
+### 1. Ingestion Server Quick Start
+
+The ingestion server receives graphs uploaded by CI pipelines.
+
+#### Using Docker Compose
+1. Ensure your `docker-compose.yml` is at the root directory of CodeGraph.
+2. Configure your environment variables in `docker-compose.yml`:
+   - `CODEGRAPH_API_KEY`: API key for auth (e.g., `my-secret-api-key`).
+   - `MYSQL_DATABASE`: The name of the MySQL database.
+3. Start the stack:
+   ```bash
+   docker-compose up -d
+   ```
+
+#### Running on Host
+1. Set up a MySQL server.
+2. Set the environment variables and start the server:
+   ```bash
+   export PORT=3000
+   export CODEGRAPH_API_KEY="my-secret-api-key"
+   export MYSQL_HOST="127.0.0.1"
+   export MYSQL_PORT="3306"
+   export MYSQL_USER="root"
+   export MYSQL_PASSWORD="root"
+   export MYSQL_DATABASE="codegraph"
+   
+   # Build and start
+   npm run build -w packages/shared
+   npm run build -w packages/ingestion-server
+   npm start -w packages/ingestion-server
+   ```
+
+### 2. CI/CD Integration (CLI Usage)
+
+On your CI pipeline (GitHub Actions, GitLab CI, Jenkins, etc.), run the `codegraph-ci` CLI to index the project and upload it:
+
+```bash
+# Build the CLI
+npm run build -w packages/ci-cli
+
+# Run extraction and upload
+node packages/ci-cli/dist/index.js \
+  --repo "your-org/your-repo" \
+  --branch "main" \
+  --ingestion-url "http://<ingestion-server-ip>:3000" \
+  --api-key "my-secret-api-key" \
+  --path .
+```
+
+#### CLI Parameters
+- `--repo` (Required): Repository identifier.
+- `--branch` (Required): Branch name.
+- `--ingestion-url` (Required): Ingestion service base URL.
+- `--api-key` (Optional): Authentication key (can also be set via the `CODEGRAPH_API_KEY` environment variable).
+- `--path` (Optional): Root directory of the repository to scan (defaults to current directory).
+
+### 3. MCP Server Configuration
+
+To expose the centralized database to your editor (e.g., Cursor, Claude Code, Gemini CLI), register the Unified MCP Server in your MCP configurations.
+
+#### Stdio Connection (Local or Docker)
+Add this to your MCP settings file (e.g., `mcp.json` or cursor config):
+
+```json
+{
+  "mcpServers": {
+    "codegraph-central": {
+      "command": "node",
+      "args": ["/path/to/codegraph/packages/mcp-server/dist/index.js"],
+      "env": {
+        "MYSQL_HOST": "127.0.0.1",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "root",
+        "MYSQL_PASSWORD": "root",
+        "MYSQL_DATABASE": "codegraph"
+      }
+    }
+  }
+}
+```
+
+Once connected, AI agents will have access to the following tools:
+- `codegraph_search` (Search symbols using MySQL Fulltext search)
+- `codegraph_explore` (Get symbol definitions and hierarchies)
+- `codegraph_node` (Retrieve node details and source code from DB)
+- `codegraph_callers` / `codegraph_callees` (Find caller/callee graphs)
+- `codegraph_impact` (Trace blast radius of changes)
+- `codegraph_versions` (List available versions)
+
+Note: All tools require the input parameters `repo` (string) and `branch` (string) to route the queries correctly. You can optionally pass `version_id` to query historical versions.
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=colbymchenry%2Fcodegraph&type=date&legend=top-left">

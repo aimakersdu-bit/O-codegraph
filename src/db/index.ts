@@ -67,7 +67,25 @@ export class DatabaseConnection {
 
     // Run schema initialization
     const schemaPath = path.join(__dirname, 'schema.sql');
-    const schema = fs.readFileSync(schemaPath, 'utf-8');
+    let schema = fs.readFileSync(schemaPath, 'utf-8');
+
+    // Check if FTS5 is supported by the SQLite engine
+    let supportsFts5 = true;
+    try {
+      db.exec('CREATE VIRTUAL TABLE temp.fts5_test USING fts5(val); DROP TABLE temp.fts5_test;');
+    } catch (err) {
+      supportsFts5 = false;
+      console.warn('[Database] FTS5 is not supported by the SQLite engine. Disabling FTS5 features.');
+    }
+
+    if (!supportsFts5) {
+      // Remove FTS virtual table and triggers
+      schema = schema.replace(/CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts[\s\S]*?\);/g, '');
+      schema = schema.replace(/CREATE TRIGGER IF NOT EXISTS nodes_ai[\s\S]*?END;/g, '');
+      schema = schema.replace(/CREATE TRIGGER IF NOT EXISTS nodes_ad[\s\S]*?END;/g, '');
+      schema = schema.replace(/CREATE TRIGGER IF NOT EXISTS nodes_au[\s\S]*?END;/g, '');
+    }
+
     db.exec(schema);
 
     // Record current schema version so migrations aren't re-applied on open

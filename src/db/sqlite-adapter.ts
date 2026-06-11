@@ -42,15 +42,17 @@ export type SqliteBackend = 'node-sqlite';
  */
 class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
+  private _isOpen: boolean;
 
   constructor(dbPath: string) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DatabaseSync } = require('node:sqlite');
     this._db = new DatabaseSync(dbPath);
+    this._isOpen = true;
   }
 
   get open(): boolean {
-    return this._db.isOpen;
+    return this._isOpen;
   }
 
   prepare(sql: string): SqliteStatement {
@@ -113,7 +115,10 @@ class NodeSqliteAdapter implements SqliteDatabase {
   close(): void {
     // node:sqlite's DatabaseSync.close() throws if already closed; make it
     // idempotent to match better-sqlite3 (callers may close more than once).
-    if (this._db.isOpen) this._db.close();
+    if (this._isOpen) {
+      this._db.close();
+      this._isOpen = false;
+    }
   }
 }
 

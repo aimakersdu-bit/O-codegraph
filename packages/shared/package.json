@@ -1,0 +1,22 @@
+{
+  "name": "@codegraph/shared",
+  "version": "0.9.9",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('dist/schema',{recursive:true});fs.copyFileSync('src/schema/001_init.sql','dist/schema/001_init.sql')\"",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@colbymchenry/codegraph": "file:../..",
+    "mysql2": "^3.11.5",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.30",
+    "@types/uuid": "^9.0.8",
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
+  }
+}

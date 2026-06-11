@@ -1,0 +1,24 @@
+{
+  "name": "@codegraph/ci-cli",
+  "version": "0.9.9",
+  "private": true,
+  "bin": {
+    "codegraph-ci": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codegraph/shared": "*",
+    "@colbymchenry/codegraph": "file:../..",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@codegraph/ingestion-server": "*",
+    "@types/node": "^20.19.30",
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
+  }
+}

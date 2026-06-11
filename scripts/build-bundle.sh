@@ -56,19 +56,42 @@ fi
 [ -f "$NODE_BIN" ] || { echo "[bundle] error: node binary not found ($NODE_BIN)" >&2; exit 1; }
 
 # 2. Build the app (compiled JS + copied wasm/schema assets).
-echo "[bundle] building app"
+echo "[bundle] building app and packages"
 ( cd "$ROOT" && npm run build >/dev/null )
+( cd "$ROOT" && npm run build -w packages/shared >/dev/null )
+( cd "$ROOT" && npm run build -w packages/ingestion-server >/dev/null )
+( cd "$ROOT" && npm run build -w packages/mcp-server >/dev/null )
+( cd "$ROOT" && npm run build -w packages/ci-cli >/dev/null )
 
 # 3. Stage: app + production-only deps (pure JS/wasm → portable across platforms).
 STAGE="$WORK/codegraph-${TARGET}"
 mkdir -p "$STAGE/lib" "$STAGE/bin"
 cp -R "$ROOT/dist" "$STAGE/lib/dist"
+
+# Copy workspaces to lib/packages so npm ci can link them
+mkdir -p "$STAGE/lib/packages/shared"
+mkdir -p "$STAGE/lib/packages/ingestion-server"
+mkdir -p "$STAGE/lib/packages/mcp-server"
+mkdir -p "$STAGE/lib/packages/ci-cli"
+
+cp "$ROOT/packages/shared/package.json" "$STAGE/lib/packages/shared/"
+cp -R "$ROOT/packages/shared/dist" "$STAGE/lib/packages/shared/dist"
+
+cp "$ROOT/packages/ingestion-server/package.json" "$STAGE/lib/packages/ingestion-server/"
+cp -R "$ROOT/packages/ingestion-server/dist" "$STAGE/lib/packages/ingestion-server/dist"
+
+cp "$ROOT/packages/mcp-server/package.json" "$STAGE/lib/packages/mcp-server/"
+cp -R "$ROOT/packages/mcp-server/dist" "$STAGE/lib/packages/mcp-server/dist"
+
+cp "$ROOT/packages/ci-cli/package.json" "$STAGE/lib/packages/ci-cli/"
+cp -R "$ROOT/packages/ci-cli/dist" "$STAGE/lib/packages/ci-cli/dist"
+
 cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"
 echo "[bundle] installing production dependencies"
 ( cd "$STAGE/lib" && npm ci --omit=dev --ignore-scripts >/dev/null 2>&1 )
 rm -f "$STAGE/lib/package-lock.json"
 
-# 4. Vendored Node + launcher (the launcher uses the bundled Node by relative
+# 4. Vendored Node + launchers (the launchers use the bundled Node by relative
 #    path, so no system Node is ever needed).
 #
 # `--liftoff-only`: keep tree-sitter's large WASM grammars on V8's Liftoff
@@ -83,25 +106,41 @@ if [ "$OSFAM" = "win32" ]; then
   cp "$NODE_BIN" "$STAGE/node.exe"
   printf '@"%%~dp0..\\node.exe" --liftoff-only "%%~dp0..\\lib\\dist\\bin\\codegraph.js" %%*\r\n' \
     > "$STAGE/bin/codegraph.cmd"
+  printf '@"%%~dp0..\\node.exe" "%%~dp0..\\lib\\packages\\ci-cli\\dist\\index.js" %%*\r\n' \
+    > "$STAGE/bin/codegraph-ci.cmd"
+  printf '@"%%~dp0..\\node.exe" "%%~dp0..\\lib\\packages\\ingestion-server\\dist\\index.js" %%*\r\n' \
+    > "$STAGE/bin/codegraph-ingestion.cmd"
+  printf '@"%%~dp0..\\node.exe" "%%~dp0..\\lib\\packages\\mcp-server\\dist\\index.js" %%*\r\n' \
+    > "$STAGE/bin/codegraph-mcp.cmd"
 else
   cp "$NODE_BIN" "$STAGE/node"
-  cat > "$STAGE/bin/codegraph" <<'LAUNCH'
+
+  # Helper function to generate launcher shell scripts
+  generate_launcher() {
+    local name="$1"
+    local entry="$2"
+    local extra_args="${3:-}"
+    cat > "$STAGE/bin/${name}" <<LAUNCH
 #!/bin/sh
-# Resolve symlinks (e.g. the ~/.local/bin/codegraph link install.sh creates) so
-# we find the real bundle dir, not the symlink's location.
-SELF="$0"
-while [ -L "$SELF" ]; do
-  target="$(readlink "$SELF")"
-  case "$target" in
-    /*) SELF="$target" ;;
-    *) SELF="$(dirname "$SELF")/$target" ;;
+# Resolve symlinks so we find the real bundle dir, not the symlink's location.
+SELF="\$0"
+while [ -L "\$SELF" ]; do
+  target="\$(readlink "\$SELF")"
+  case "\$target" in
+    /*) SELF="\$target" ;;
+    *) SELF="\$(dirname "\$SELF")/\$target" ;;
   esac
 done
-DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
-# --liftoff-only: avoid the V8 turboshaft WASM Zone OOM (issues #293/#298).
-exec "$DIR/node" --liftoff-only "$DIR/lib/dist/bin/codegraph.js" "$@"
+DIR="\$(cd "\$(dirname "\$SELF")/.." && pwd)"
+exec "\$DIR/node" ${extra_args} "\$DIR/${entry}" "\$@"
 LAUNCH
-  chmod +x "$STAGE/bin/codegraph"
+    chmod +x "$STAGE/bin/${name}"
+  }
+
+  generate_launcher "codegraph" "lib/dist/bin/codegraph.js" "--liftoff-only"
+  generate_launcher "codegraph-ci" "lib/packages/ci-cli/dist/index.js"
+  generate_launcher "codegraph-ingestion" "lib/packages/ingestion-server/dist/index.js"
+  generate_launcher "codegraph-mcp" "lib/packages/mcp-server/dist/index.js"
 fi
 
 # 5. Archive (.zip for Windows, .tar.gz otherwise).
