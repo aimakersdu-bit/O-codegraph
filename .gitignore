@@ -59,3 +59,5 @@ release/
 
 # Local-only: browser-based tmux session launcher (see tmux-web/README.md)
 tmux-web/
+node-debug-env/
+
