@@ -55,6 +55,7 @@ graph TB
 | **Ingestion Server** | `codegraph-ingestion` | 接收 CI 上传的图谱数据，写入 MySQL，管理版本 |
 | **MCP Server** | `codegraph-mcp` | 暴露 MCP 工具给 opencode，从 MySQL 查询图谱 |
 | **CI CLI** | `codegraph-ci` | 在 CI 流水线中提取代码图谱并上传至 Ingestion Server |
+| **Local CLI** | `codegraph` | 本地核心命令行工具，用于单机模式的初始化、状态查询、索引等 |
 | **MySQL 8.0** | — | 存储代码图谱（节点、边、文件、元数据），支持全文检索 |
 
 ### 数据流
@@ -112,6 +113,9 @@ Release 目录下提供以下平台的安装包：
 | `codegraph-linux-x64.tar.gz` | Linux x86_64 | ~54MB |
 | `codegraph-linux-arm64.tar.gz` | Linux ARM64 | ~54MB |
 | `codegraph-darwin-x64.tar.gz` | macOS Intel | ~50MB |
+| `codegraph-darwin-arm64.tar.gz` | macOS Apple Silicon | ~50MB |
+| `codegraph-win32-x64.zip` | Windows x64 | ~60MB |
+| `codegraph-win32-arm64.zip` | Windows ARM64 | ~60MB |
 
 ### 3.2 安装包内容结构
 
