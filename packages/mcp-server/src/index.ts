@@ -1,9 +1,11 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { MysqlDatabaseImpl } from '@codegraph/shared';
 import { tools } from './tools';
 import { ToolHandler } from './tool-handler';
+import express from 'express';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -48,10 +50,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function run() {
-  const transport = new StdioServerTransport();
-  console.error('[MCP Server] Starting stdio transport...');
-  await server.connect(transport);
-  console.error('[MCP Server] Ready and serving tools!');
+  const mode = process.env.MCP_MODE || 'stdio';
+
+  if (mode === 'sse') {
+    const app = express();
+    const port = parseInt(process.env.MCP_PORT || '3001', 10);
+
+    const transports = new Map<string, SSEServerTransport>();
+
+    app.get('/sse', async (_req, res) => {
+      console.error('[MCP Server] New SSE connection request');
+      const transport = new SSEServerTransport('/messages', res);
+      transports.set(transport.sessionId, transport);
+
+      transport.onclose = () => {
+        console.error(`[MCP Server] SSE connection closed for session: ${transport.sessionId}`);
+        transports.delete(transport.sessionId);
+      };
+
+      await server.connect(transport);
+    });
+
+    app.post('/messages', async (req, res) => {
+      const sessionId = req.query.sessionId as string;
+      const transport = transports.get(sessionId);
+      if (transport) {
+        await transport.handlePostMessage(req, res);
+      } else {
+        res.status(400).send('No active SSE connection for session');
+      }
+    });
+
+    app.listen(port, () => {
+      console.error(`[MCP Server] SSE transport listening on port ${port}`);
+      console.error(`- Connection URL: http://localhost:${port}/sse`);
+      console.error(`- Message URL: http://localhost:${port}/messages`);
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    console.error('[MCP Server] Starting stdio transport...');
+    await server.connect(transport);
+    console.error('[MCP Server] Ready and serving tools!');
+  }
 }
 
 run().catch((err) => {
