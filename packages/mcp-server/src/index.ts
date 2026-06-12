@@ -6,6 +6,7 @@ import { MysqlDatabaseImpl } from '@codegraph/shared';
 import { tools } from './tools';
 import { ToolHandler } from './tool-handler';
 import express from 'express';
+import cors from 'cors';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -54,6 +55,7 @@ async function run() {
 
   if (mode === 'sse') {
     const app = express();
+    app.use(cors());
     const port = parseInt(process.env.MCP_PORT || '3001', 10);
 
     const transports = new Map<string, SSEServerTransport>();

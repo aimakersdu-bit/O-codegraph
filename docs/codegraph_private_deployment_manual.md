@@ -660,9 +660,20 @@ sudo systemctl enable codegraph-mcp
 sudo systemctl start codegraph-mcp
 ```
 
-#### 6.4.2 客户端配置（以 opencode / Cursor 为例）
+#### 6.4.2 客户端配置（以 opencode / Cursor / Claude Desktop 为例）
 
 开发者在本地无需下载任何 CodeGraph 安装包，只需直接在 IDE 配置文件中添加 sse 节点即可：
+
+**Claude Desktop / Cursor 配置文件配置示例 (`claude_desktop_config.json`)**：
+```json
+{
+  "mcpServers": {
+    "codegraph-remote": {
+      "serverUrl": "http://<你的远程服务器IP>:3001/sse"
+    }
+  }
+}
+```
 
 **opencode 配置示例 (`opencode.jsonc`)**：
 ```jsonc
@@ -677,7 +688,7 @@ sudo systemctl start codegraph-mcp
 }
 ```
 
-**Cursor 配置示例**：
+**Cursor 界面配置方法**：
 - 进入 Settings -> Beta -> MCP
 - 点击 `+ Add New MCP Server`
 - **Name**: `codegraph`
