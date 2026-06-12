@@ -554,12 +554,12 @@ CodeGraph 支持两种 MCP 运行模式：
 opencode (客户端) ←stdio→ codegraph-mcp (本地进程) ←TCP:3306→ MySQL (远程服务器)
 ```
 
-#### 模式 B：远程 SSE 模式（推荐）
-`codegraph-mcp` 作为一个 Web 服务运行在远程服务器上（可与 MySQL 部署在同一台机器），开发者客户端通过 HTTP/SSE 协议连接该服务。
+#### 模式 B：远程 SSE / HTTP API 模式（推荐）
+`codegraph-mcp` 作为一个 Web 服务运行在远程服务器上（可与 MySQL 部署在同一台机器），开发者客户端通过 HTTP/SSE 协议连接该服务。此服务同时提供标准 MCP SSE 接口与普通 HTTP REST API 接口。
 ```
-opencode (客户端) ←HTTP/SSE:3001→ codegraph-mcp (远程服务) ←TCP:3306→ MySQL (同机或远程)
+opencode (或 HTTP 客户端) ←HTTP/SSE/REST:3001→ codegraph-mcp (远程服务) ←TCP:3306→ MySQL (同机或远程)
 ```
-**SSE 模式的优势：**
+**远程模式的优势：**
 - **安全性高**：开发者的电脑无需直连数据库，免去暴露数据库 3306 端口的安全隐患。
 - **配置极其简单**：开发者无需在本地解压 release 包和配置 Node 运行时，只需填入一个 URL 即可使用。
 
@@ -613,7 +613,7 @@ tar -xzf codegraph-linux-x64.tar.gz -C ~/tools/
 
 ---
 
-### 6.4 部署与配置远程 SSE 模式
+### 6.4 部署与配置远程 SSE / HTTP API 模式
 
 #### 6.4.1 服务端部署
 
@@ -698,6 +698,69 @@ sudo systemctl start codegraph-mcp
 - **Name**: `codegraph`
 - **Type**: `SSE`
 - **URL**: `http://<你的远程服务器IP>:3001/sse`
+
+#### 6.4.3 HTTP REST API 使用说明
+
+当 `MCP_MODE` 设置为 `sse` 时，`codegraph-mcp` 服务不仅支持标准 MCP 协议，还会暴露一组可以直接通过 HTTP 访问的普通 REST API 接口，这方便了非 MCP 客户端（如前端仪表板、自定义脚本、命令行 Curl）的直接调用。
+
+##### 1. 服务基本信息查询
+
+- **请求**：`GET http://<你的远程服务器IP>:3001/` 或 `GET http://<你的远程服务器IP>:3001/api`
+- **响应示例**：
+  ```json
+  {
+    "name": "codegraph-central-mcp",
+    "version": "0.9.9",
+    "mode": "sse"
+  }
+  ```
+
+##### 2. 工具定义查询
+
+- **请求**：`GET http://<你的远程服务器IP>:3001/api/tools`
+- **响应**：返回所有可用 MCP 工具的 JSON 格式描述信息（等效于 MCP 协议中的 `list_tools` 响应）。
+
+##### 3. 工具执行通用接口
+
+- **请求**：`POST http://<你的远程服务器IP>:3001/api/tools/:toolName`
+  - `:toolName` 可传入完整的工具名（如 `codegraph_explore`），或省略前缀（如 `explore`）。
+- **请求体（JSON）**：
+  ```json
+  {
+    "repo": "your-org/your-repo",
+    "branch": "main",
+    "query": "AuthService"
+  }
+  ```
+- **响应示例**：
+  ```json
+  {
+    "content": [
+      {
+        "type": "text",
+        "text": "..."
+      }
+    ]
+  }
+  ```
+
+##### 4. 工具执行快捷路径
+
+除了 `/api/tools/:toolName` 之外，服务还为全部 9 个工具提供了快捷路由：
+
+- `POST http://<你的远程服务器IP>:3001/api/:shortcut`
+  - 可用的快捷路由名有：`search`、`explore`、`node`、`callers`、`callees`、`impact`、`files`、`status`、`versions`。
+
+**示例**（调用 `codegraph_explore` 快捷接口）：
+- **请求**：`POST http://<你的远程服务器IP>:3001/api/explore`
+- **请求体**：
+  ```json
+  {
+    "repo": "your-org/your-repo",
+    "branch": "main",
+    "query": "mutateElement"
+  }
+  ```
 
 ---
 
