@@ -46,6 +46,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // Register tool call handler
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  console.error(`[MCP Server] Call tool request: ${name}`, args);
   const result = await handler.execute(name, args || {});
   return result as any;
 });
@@ -60,7 +61,7 @@ async function run() {
 
     const transports = new Map<string, SSEServerTransport>();
 
-    app.get('/sse', async (_req, res) => {
+    app.get(['/sse', '/mcp'], async (_req, res) => {
       console.error('[MCP Server] New SSE connection request');
       const transport = new SSEServerTransport('/messages', res);
       transports.set(transport.sessionId, transport);
@@ -73,13 +74,15 @@ async function run() {
       await server.connect(transport);
     });
 
-    app.post('/messages', async (req, res) => {
-      const sessionId = req.query.sessionId as string;
+    app.post(['/messages', '/mcp/messages'], async (req, res) => {
+      const sessionId = (req.query.sessionId || req.query.session_id || req.headers['mcp-session-id']) as string;
+      console.error(`[MCP Server] POST /messages received for session: ${sessionId}`);
       const transport = transports.get(sessionId);
       if (transport) {
         await transport.handlePostMessage(req, res);
       } else {
-        res.status(400).send('No active SSE connection for session');
+        console.error(`[MCP Server] Session not found: ${sessionId}`);
+        res.status(404).send('Session not found');
       }
     });
 
