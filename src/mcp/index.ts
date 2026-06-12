@@ -50,6 +50,8 @@ import {
 import { connectWithHello, runLocalHandshakeProxy } from './proxy';
 import { getDaemonSocketPath } from './daemon-paths';
 import { HOST_PPID_ENV } from '../extraction/wasm-runtime-flags';
+import type { HTTPServer as HTTPServerType } from '../server/http-server';
+import type { HTTPServerOptions } from '../server/http-server';
 
 /**
  * How often to poll `process.ppid` to detect parent process death (see #277).
@@ -198,6 +200,16 @@ function spawnDetachedDaemon(root: string): void {
   }
 }
 
+/** Options for the MCPServer constructor. */
+export interface MCPServerOptions {
+  /**
+   * When set, the MCP server will also start an HTTP API server on the
+   * specified port/host, sharing its internal {@link MCPEngine}. This
+   * ensures a single SQLite connection and file watcher for both protocols.
+   */
+  http?: HTTPServerOptions;
+}
+
 /**
  * MCP Server for CodeGraph
  *
@@ -224,9 +236,13 @@ export class MCPServer {
   // Idempotency guard for stop().
   private stopped = false;
   private mode: 'unstarted' | 'direct' | 'proxy' | 'daemon' = 'unstarted';
+  /** HTTP sidecar options. When set, direct mode spins up an HTTP server. */
+  private httpOpts: HTTPServerOptions | undefined;
+  private httpServer: HTTPServerType | null = null;
 
-  constructor(projectPath?: string) {
+  constructor(projectPath?: string, opts?: MCPServerOptions) {
     this.projectPath = projectPath || null;
+    this.httpOpts = opts?.http;
   }
 
   /**
@@ -249,10 +265,10 @@ export class MCPServer {
       return this.startDaemonProcess();
     }
 
-    // Direct mode if the user opted out. Setting the env var is sufficient to
-    // get the pre-#411 single-process behavior.
-    if (daemonOptOutSet()) {
-      return this.startDirect('CODEGRAPH_NO_DAEMON set');
+    // Direct mode if the user opted out or requested the HTTP sidecar.
+    // Setting the env var is sufficient to get the pre-#411 single-process behavior.
+    if (daemonOptOutSet() || this.httpOpts) {
+      return this.startDirect(this.httpOpts ? 'HTTP sidecar requested' : 'CODEGRAPH_NO_DAEMON set');
     }
 
     const root = resolveDaemonRoot(this.projectPath);
@@ -292,6 +308,11 @@ export class MCPServer {
       clearInterval(this.ppidWatchdog);
       this.ppidWatchdog = null;
     }
+    // Stop HTTP sidecar if running.
+    if (this.httpServer) {
+      this.httpServer.stop();
+      this.httpServer = null;
+    }
     if (this.daemon) {
       void this.daemon.stop('stop()');
       // Daemon.stop calls process.exit; nothing else to do.
@@ -325,6 +346,13 @@ export class MCPServer {
     }
 
     this.session.start();
+
+    // Spin up an HTTP API sidecar sharing the same engine when requested.
+    if (this.httpOpts) {
+      const { HTTPServer } = await import('../server/http-server');
+      this.httpServer = new HTTPServer(this.engine, this.httpOpts);
+      await this.httpServer.start();
+    }
 
     // Detect parent-process death — same logic as pre-refactor. When stdin
     // closes we go through StdioTransport's `process.exit(0)` already, but
@@ -454,3 +482,5 @@ export { tools, ToolHandler } from './tools';
 // Surface a few daemon-mode bits for tests + diagnostics.
 export { Daemon } from './daemon';
 export { CodeGraphPackageVersion } from './version';
+// HTTP API server for non-MCP consumers.
+export { HTTPServer } from '../server/http-server';

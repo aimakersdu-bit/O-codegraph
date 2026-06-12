@@ -1078,11 +1078,14 @@ function printFileTree(
  */
 program
   .command('serve')
-  .description('Start CodeGraph as an MCP server for AI assistants')
+  .description('Start CodeGraph as an MCP server (with optional HTTP API)')
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Run as MCP server (stdio transport)')
+  .option('-t, --http', 'Also start an HTTP API server (requires --mcp)')
+  .option('--port <number>', 'HTTP API port (default: 5123)', '5123')
+  .option('--host <string>', 'HTTP API bind address (default: 127.0.0.1)', '127.0.0.1')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .action(async (options: { path?: string; mcp?: boolean; http?: boolean; port?: string; host?: string; watch?: boolean }) => {
     const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     // Commander sets watch=false when --no-watch is passed. Route it through
@@ -1092,17 +1095,31 @@ program
     }
 
     try {
+      // --http requires --mcp; reject standalone HTTP-only usage.
+      if (options.http && !options.mcp) {
+        console.error(chalk.red(getGlyphs().err) + ' --http can only be used together with --mcp');
+        console.error(chalk.blue(getGlyphs().info) + ' Example: codegraph serve --mcp --http');
+        process.exit(1);
+      }
+
       if (options.mcp) {
-        // Start MCP server - it handles initialization lazily based on rootUri from client
+        // ── MCP server (with optional HTTP sidecar) ───────────────────
         const { MCPServer } = await import('../mcp/index');
-        const server = new MCPServer(projectPath);
+
+        // When --http is requested, pass HTTP options so the MCP server
+        // spins up an HTTP API server sharing its own engine.
+        const httpOpts = options.http
+          ? { port: parseInt(options.port || '5123', 10), host: options.host || '127.0.0.1' }
+          : undefined;
+
+        const server = new MCPServer(projectPath, { http: httpOpts });
         await server.start();
         // Server will run until terminated
       } else {
-        // Default: show info about MCP mode.
-        // Use stderr so stdout stays clean for any piped/stdio usage.
-        console.error(chalk.bold('\nCodeGraph MCP Server\n'));
+        // Default: show info about modes.
+        console.error(chalk.bold('\nCodeGraph Server\n'));
         console.error(chalk.blue(getGlyphs().info) + ' Use --mcp flag to start the MCP server');
+        console.error(chalk.blue(getGlyphs().info) + ' Use --mcp --http to also expose an HTTP API in the same process');
         console.error('\nTo use with Claude Code, add to your MCP configuration:');
         console.error(chalk.dim(`
 {
@@ -1114,6 +1131,11 @@ program
   }
 }
 `));
+        console.error('\nTo also expose an HTTP API alongside MCP:');
+        console.error(chalk.dim(`
+  codegraph serve --mcp --http              # MCP + HTTP (port 5123)
+  codegraph serve --mcp --http --port 8080  # custom port
+`));
         console.error('Available tools:');
         console.error(chalk.cyan('  codegraph_explore') + '   - Primary: source of the relevant symbols for any question');
         console.error(chalk.cyan('  codegraph_search') + '    - Search for code symbols');
@@ -1123,6 +1145,17 @@ program
         console.error(chalk.cyan('  codegraph_node') + '      - Get symbol details');
         console.error(chalk.cyan('  codegraph_files') + '     - Get project file structure');
         console.error(chalk.cyan('  codegraph_status') + '    - Get index status');
+        console.error('\nHTTP API endpoints (when --http is enabled):');
+        console.error(chalk.cyan('  GET  /api') + '           - Server info');
+        console.error(chalk.cyan('  GET  /api/tools') + '     - List available tools');
+        console.error(chalk.cyan('  POST /api/search') + '    - Search symbols');
+        console.error(chalk.cyan('  POST /api/explore') + '   - Explore code');
+        console.error(chalk.cyan('  POST /api/node') + '      - Get symbol details');
+        console.error(chalk.cyan('  POST /api/callers') + '   - Find callers');
+        console.error(chalk.cyan('  POST /api/callees') + '   - Find callees');
+        console.error(chalk.cyan('  POST /api/impact') + '    - Impact analysis');
+        console.error(chalk.cyan('  POST /api/files') + '     - File structure');
+        console.error(chalk.cyan('  POST /api/status') + '    - Index status');
       }
     } catch (err) {
       error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);

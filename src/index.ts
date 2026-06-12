@@ -81,7 +81,7 @@ export {
 } from './errors';
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
-export { MCPServer } from './mcp';
+export { MCPServer, HTTPServer } from './mcp';
 
 /**
  * Options for initializing a new CodeGraph project

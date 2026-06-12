@@ -57,7 +57,78 @@ async function run() {
   if (mode === 'sse') {
     const app = express();
     app.use(cors());
+    app.use(express.json({ limit: '1mb' }));
     const port = parseInt(process.env.MCP_PORT || '3001', 10);
+
+    // ===========================================================================
+    // Ordinary HTTP REST API Endpoints
+    // ===========================================================================
+
+    // GET /api — server info
+    app.get(['/api', '/'], (_req, res) => {
+      res.json({
+        name: 'codegraph-central-mcp',
+        version: '0.9.9',
+        mode: 'sse',
+      });
+    });
+
+    // GET /api/tools — tool definitions
+    app.get('/api/tools', (_req, res) => {
+      res.json({ tools });
+    });
+
+    const SHORTCUT_ROUTES: Record<string, string> = {
+      search:   'codegraph_search',
+      explore:  'codegraph_explore',
+      node:     'codegraph_node',
+      callers:  'codegraph_callers',
+      callees:  'codegraph_callees',
+      impact:   'codegraph_impact',
+      files:    'codegraph_files',
+      status:   'codegraph_status',
+      versions: 'codegraph_versions',
+    };
+
+    const executeTool = async (res: express.Response, toolName: string, args: any) => {
+      const tool = tools.find((t) => t.name === toolName);
+      if (!tool) {
+        return res.status(404).json({
+          error: `Unknown tool: ${toolName}`,
+          availableTools: tools.map((t) => t.name),
+        });
+      }
+      try {
+        const result = await handler.execute(toolName, args || {});
+        const statusCode = result.isError ? 422 : 200;
+        return res.status(statusCode).json(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return res.status(500).json({ error: `Tool execution failed: ${msg}` });
+      }
+    };
+
+    // POST /api/tools/:toolName — generic tool execution
+    app.post('/api/tools/:toolName', async (req, res) => {
+      const rawName = req.params.toolName;
+      const toolName = rawName.startsWith('codegraph_') ? rawName : `codegraph_${rawName}`;
+      await executeTool(res, toolName, req.body);
+    });
+
+    // POST /api/:shortcut — shortcut route execution
+    app.post('/api/:shortcut', async (req, res) => {
+      const key = req.params.shortcut;
+      const toolName = SHORTCUT_ROUTES[key];
+      if (toolName) {
+        await executeTool(res, toolName, req.body);
+      } else {
+        res.status(404).json({ error: `Shortcut route /api/${key} not found` });
+      }
+    });
+
+    // ===========================================================================
+    // MCP SSE Transports
+    // ===========================================================================
 
     const transports = new Map<string, SSEServerTransport>();
 
