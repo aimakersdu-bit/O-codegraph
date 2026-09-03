@@ -1,13 +1,18 @@
-import { MysqlDatabase, QueryBuilder, QueryContext } from '@codegraph/shared';
+import { QueryBuilder } from '@codegraph/shared';
 import { formatContextAsMarkdown } from '@colbymchenry/codegraph/dist/context/formatter';
 import { AsyncGraphTraverser } from './graph';
 import { AsyncContextBuilder } from './context';
 import { ToolResult } from './types';
 import { minimatch } from 'minimatch';
+import { openQueryBuilder } from './sqlite-query';
+
+export interface ToolExecutionContext {
+  requestId?: string | number;
+  progressToken?: string | number;
+  sendNotification?: (notification: any) => Promise<void>;
+}
 
 export class ToolHandler {
-  constructor(private db: MysqlDatabase) {}
-
   private errorResult(message: string): ToolResult {
     return {
       content: [{ type: 'text', text: message }],
@@ -21,46 +26,75 @@ export class ToolHandler {
     };
   }
 
-  private async getContext(args: Record<string, any>): Promise<QueryContext> {
-    const repo = args.repo;
-    const branch = args.branch;
-    const versionId = args.version_id;
-
-    if (!repo || !branch) {
-      throw new Error('Missing repo or branch parameter');
+  private async emitProgress(context: ToolExecutionContext | undefined, progress: number, message: string) {
+    if (!context?.progressToken || !context.sendNotification) {
+      return;
     }
-
-    return QueryBuilder.resolveContext(this.db, repo, branch, versionId);
+    await context.sendNotification({
+      method: 'notifications/progress',
+      params: {
+        progressToken: context.progressToken,
+        progress,
+        message,
+      },
+    });
   }
 
-  async execute(name: string, args: Record<string, any>): Promise<ToolResult> {
+  private async emitLog(context: ToolExecutionContext | undefined, level: 'debug' | 'info' | 'notice' | 'warning' | 'error', data: any) {
+    if (!context?.sendNotification) {
+      return;
+    }
+    await context.sendNotification({
+      method: 'notifications/message',
+      params: {
+        level,
+        data,
+      },
+    });
+  }
+
+  async execute(name: string, args: Record<string, any>, context?: ToolExecutionContext): Promise<ToolResult> {
     try {
-      const ctx = await this.getContext(args);
-      const qb = new QueryBuilder(this.db, ctx);
+      const repo = args.repo;
+      const version = args.version;
+      const versionId = args.version_id;
+      if (!repo || !version) throw new Error('Missing repo or version parameter');
+      const { db, qb } = await openQueryBuilder(repo, version, versionId);
       const traverser = new AsyncGraphTraverser(qb);
       const contextBuilder = new AsyncContextBuilder(qb, traverser);
-
-      switch (name) {
-        case 'codegraph_search':
-          return await this.handleSearch(qb, args);
-        case 'codegraph_callers':
-          return await this.handleCallers(qb, traverser, args);
-        case 'codegraph_callees':
-          return await this.handleCallees(qb, traverser, args);
-        case 'codegraph_impact':
-          return await this.handleImpact(qb, traverser, args);
-        case 'codegraph_node':
-          return await this.handleNode(qb, traverser, args);
-        case 'codegraph_explore':
-          return await this.handleExplore(contextBuilder, args);
-        case 'codegraph_status':
-          return await this.handleStatus(qb);
-        case 'codegraph_files':
-          return await this.handleFiles(qb, args);
-        case 'codegraph_versions':
-          return await this.handleVersions(qb);
-        default:
-          return this.errorResult(`Unknown tool: ${name}`);
+      try {
+        await this.emitProgress(context, 5, `Opening ${repo}@${version}`);
+        switch (name) {
+          case 'codegraph_search':
+            await this.emitProgress(context, 20, 'Searching symbols');
+            return await this.handleSearch(qb, args);
+          case 'codegraph_callers':
+            await this.emitProgress(context, 20, 'Resolving callers');
+            return await this.handleCallers(qb, traverser, args);
+          case 'codegraph_callees':
+            await this.emitProgress(context, 20, 'Resolving callees');
+            return await this.handleCallees(qb, traverser, args);
+          case 'codegraph_impact':
+            await this.emitProgress(context, 20, 'Analyzing impact');
+            return await this.handleImpact(qb, traverser, args);
+          case 'codegraph_node':
+            await this.emitProgress(context, 20, 'Loading symbol details');
+            return await this.handleNode(qb, traverser, args);
+          case 'codegraph_explore':
+            return await this.handleExplore(contextBuilder, args, context);
+          case 'codegraph_status':
+            await this.emitProgress(context, 15, 'Reading repository stats');
+            return await this.handleStatus(qb);
+          case 'codegraph_files':
+            await this.emitProgress(context, 15, 'Enumerating files');
+            return await this.handleFiles(qb, args);
+          case 'codegraph_versions':
+            await this.emitProgress(context, 15, 'Listing versions');
+            return await this.handleVersions(qb);
+          default: return this.errorResult(`Unknown tool: ${name}`);
+        }
+      } finally {
+        await db.close();
       }
     } catch (err: any) {
       console.error(`[ToolHandler] Error running tool ${name}:`, err);
@@ -230,12 +264,22 @@ export class ToolHandler {
 
   private async handleExplore(
     contextBuilder: AsyncContextBuilder,
-    args: Record<string, any>
+    args: Record<string, any>,
+    context?: ToolExecutionContext
   ): Promise<ToolResult> {
     const query = args.query;
     const maxFiles = args.maxFiles || 12;
-    const context = await contextBuilder.buildContext(query, { maxCodeBlocks: maxFiles });
-    const formatted = formatContextAsMarkdown(context);
+    await this.emitProgress(context, 30, `Exploring "${query}"`);
+    await this.emitLog(context, 'info', { stage: 'search', query });
+    const explored = await contextBuilder.buildContext(query, {
+      maxCodeBlocks: maxFiles,
+      onProgress: async (progress, message) => {
+        await this.emitProgress(context, progress, message);
+      },
+    });
+    await this.emitProgress(context, 92, 'Formatting result');
+    const formatted = formatContextAsMarkdown(explored);
+    await this.emitProgress(context, 100, 'Done');
 
     return this.textResult(formatted);
   }

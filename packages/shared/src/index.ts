@@ -1,5 +1,5 @@
 export const name = 'shared';
-export { runMigrations } from './schema/migrate';
 export * from './types';
-export { MysqlDatabaseImpl, TransactionDatabaseWrapper } from './mysql-adapter';
+export { SqliteDatabaseImpl, SqliteTransactionWrapper } from './sqlite-adapter';
+export { sanitizeDbComponent, isValidExportVersion, getRepoVersionDbName, getRepoVersionDbPath } from './db-path';
 export { QueryBuilder } from './queries';

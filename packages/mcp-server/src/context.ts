@@ -10,6 +10,8 @@ import {
 import { QueryBuilder } from '@codegraph/shared';
 import { AsyncGraphTraverser } from './graph';
 
+type ContextProgressReporter = (progress: number, message: string) => Promise<void> | void;
+
 export class AsyncContextBuilder {
   private traverser: AsyncGraphTraverser;
 
@@ -20,7 +22,10 @@ export class AsyncContextBuilder {
     this.traverser = traverser || new AsyncGraphTraverser(queries);
   }
 
-  async findRelevantContext(query: string, options: BuildContextOptions = {}): Promise<Subgraph> {
+  async findRelevantContext(
+    query: string,
+    options: BuildContextOptions & { onProgress?: ContextProgressReporter } = {}
+  ): Promise<Subgraph> {
     const opts = {
       searchLimit: 10,
       traversalDepth: 2,
@@ -35,6 +40,7 @@ export class AsyncContextBuilder {
 
     // 1. Search for entry points via FTS/LIKE
     let searchResults = await this.queries.searchNodes(query, { limit: opts.searchLimit });
+    await opts.onProgress?.(38, `Found ${searchResults.length} candidate symbols`);
 
     // 2. Add entry points to roots
     for (const result of searchResults) {
@@ -45,11 +51,16 @@ export class AsyncContextBuilder {
     }
 
     // 3. Traverse BFS from each entry point
-    for (const rootId of roots) {
+    for (let i = 0; i < roots.length; i++) {
+      const rootId = roots[i]!;
       const traversalResult = await this.traverser.traverseBFS(rootId, {
         maxDepth: opts.traversalDepth,
         limit: Math.ceil(opts.maxNodes / Math.max(1, roots.length)),
       });
+      await opts.onProgress?.(
+        45 + Math.round((i / Math.max(1, roots.length)) * 25),
+        `Traversed ${i + 1}/${roots.length} entry points`
+      );
 
       for (const [id, node] of traversalResult.nodes) {
         if (!nodes.has(id)) {
@@ -73,6 +84,7 @@ export class AsyncContextBuilder {
       [...nodes.keys()],
       recoveryKinds
     );
+    await opts.onProgress?.(75, `Recovered ${recoveredEdges.length} relation edges`);
     const existingKeys = new Set(edges.map((e) => `${e.source}:${e.target}:${e.kind}`));
     for (const edge of recoveredEdges) {
       const key = `${edge.source}:${edge.target}:${edge.kind}`;
@@ -89,7 +101,10 @@ export class AsyncContextBuilder {
     };
   }
 
-  async buildContext(query: string, options: BuildContextOptions = {}): Promise<TaskContext> {
+  async buildContext(
+    query: string,
+    options: BuildContextOptions & { onProgress?: ContextProgressReporter } = {}
+  ): Promise<TaskContext> {
     const subgraph = await this.findRelevantContext(query, options);
 
     // Get entry points
@@ -119,7 +134,8 @@ export class AsyncContextBuilder {
 
     // Load source code from DB for top symbols (max 8 blocks, max 4000 chars each)
     const maxBlocks = options.maxCodeBlocks || 8;
-    for (const node of priorityNodes) {
+    for (let i = 0; i < priorityNodes.length; i++) {
+      const node = priorityNodes[i]!;
       if (codeBlocks.length >= maxBlocks) break;
       const code = await this.queries.getNodeSourceCode(node.id);
       if (code) {
@@ -131,6 +147,10 @@ export class AsyncContextBuilder {
           language: node.language,
           node,
         });
+        await options.onProgress?.(
+          80 + Math.round((codeBlocks.length / Math.max(1, maxBlocks)) * 15),
+          `Collected source for ${codeBlocks.length}/${maxBlocks} nodes`
+        );
       }
     }
 

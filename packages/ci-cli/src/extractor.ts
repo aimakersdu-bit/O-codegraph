@@ -3,10 +3,44 @@ import * as path from 'path';
 import { CodeGraph } from '@colbymchenry/codegraph';
 import { DatabaseConnection, getDatabasePath } from '@colbymchenry/codegraph';
 import { Node, Edge, FileRecord } from '@colbymchenry/codegraph';
+import { SourceCodeExtractionConfig, resolveSourceCodeExtractionConfig } from './config';
 import { IngestionPayload } from './uploader';
 
-export async function extractAndBuildPayload(projectRoot: string): Promise<IngestionPayload> {
+const SOURCE_CODE_KINDS = new Set(['function', 'method', 'route', 'component']);
+
+type SourceCandidate = {
+  index: number;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  sourceCode: string;
+};
+
+function countCoveredLines(intervals: Array<[number, number]>): number {
+  if (intervals.length === 0) return 0;
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let covered = 0;
+  let [start, end] = sorted[0]!;
+  for (let i = 1; i < sorted.length; i++) {
+    const [nextStart, nextEnd] = sorted[i]!;
+    if (nextStart <= end + 1) {
+      end = Math.max(end, nextEnd);
+    } else {
+      covered += end - start + 1;
+      start = nextStart;
+      end = nextEnd;
+    }
+  }
+  covered += end - start + 1;
+  return covered;
+}
+
+export async function extractAndBuildPayload(
+  projectRoot: string,
+  config: Partial<SourceCodeExtractionConfig> = {}
+): Promise<IngestionPayload> {
   const resolvedRoot = path.resolve(projectRoot);
+  const sourceConfig = resolveSourceCodeExtractionConfig(config);
   console.log(`[Extractor] Starting extraction in ${resolvedRoot}...`);
 
   // 1. Initialize or open CodeGraph
@@ -58,28 +92,11 @@ export async function extractAndBuildPayload(projectRoot: string): Promise<Inges
   // 5. Build Node structures and extract source code slices
   console.log('[Extractor] Reading source code slices for nodes...');
   const fileCache = new Map<string, string[]>();
+  const sourceCandidatesByFile = new Map<string, SourceCandidate[]>();
 
-  const nodes: Array<Node & { sourceCode?: string }> = allNodesRaw.map((row) => {
-    let sourceCode: string | undefined;
+  const nodes: Array<Node & { sourceCode?: string }> = allNodesRaw.map((row, index) => {
     const filePath = path.join(resolvedRoot, row.file_path);
-
-    try {
-      if (fs.existsSync(filePath)) {
-        let lines = fileCache.get(row.file_path);
-        if (!lines) {
-          const content = fs.readFileSync(filePath, 'utf-8');
-          lines = content.split('\n');
-          fileCache.set(row.file_path, lines);
-        }
-        const startIdx = Math.max(0, row.start_line - 1);
-        const endIdx = Math.min(lines.length, row.end_line);
-        sourceCode = lines.slice(startIdx, endIdx).join('\n');
-      }
-    } catch (err) {
-      console.warn(`[Extractor] Warning: Could not read source code for node ${row.id} from ${row.file_path}:`, err);
-    }
-
-    return {
+    const node: Node & { sourceCode?: string } = {
       id: row.id,
       kind: row.kind,
       name: row.name,
@@ -100,9 +117,61 @@ export async function extractAndBuildPayload(projectRoot: string): Promise<Inges
       decorators: row.decorators ? JSON.parse(row.decorators) : undefined,
       typeParameters: row.type_parameters ? JSON.parse(row.type_parameters) : undefined,
       updatedAt: Number(row.updated_at),
-      sourceCode,
     };
+
+    try {
+      if (SOURCE_CODE_KINDS.has(String(row.kind)) && fs.existsSync(filePath)) {
+        let lines = fileCache.get(row.file_path);
+        if (!lines) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          lines = content.split('\n');
+          fileCache.set(row.file_path, lines);
+        }
+        const startIdx = Math.max(0, row.start_line - 1);
+        const endIdx = Math.min(lines.length, row.end_line);
+        const sourceCode = lines.slice(startIdx, endIdx).join('\n');
+        const lineCount = Math.max(0, endIdx - startIdx);
+        if (lineCount > 0 && lineCount <= sourceConfig.maxNodeSourceLines && Buffer.byteLength(sourceCode, 'utf8') <= sourceConfig.maxNodeSourceBytes) {
+          const candidates = sourceCandidatesByFile.get(row.file_path) ?? [];
+          candidates.push({
+            index,
+            filePath: row.file_path,
+            startLine: row.start_line,
+            endLine: row.end_line,
+            sourceCode,
+          });
+          sourceCandidatesByFile.set(row.file_path, candidates);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Extractor] Warning: Could not read source code for node ${row.id} from ${row.file_path}:`, err);
+    }
+
+    return node;
   });
+
+  for (const [filePath, candidates] of sourceCandidatesByFile.entries()) {
+    const fileLines = fileCache.get(filePath) ?? [];
+    const totalLines = fileLines.length;
+    const maxCoverage = Math.max(
+      1,
+      Math.min(sourceConfig.maxFileSourceLines, Math.floor(totalLines * sourceConfig.maxFileSourceCoverage))
+    );
+    const selected: Array<[number, number]> = [];
+    const sorted = [...candidates].sort((a, b) => {
+      const lenA = a.endLine - a.startLine;
+      const lenB = b.endLine - b.startLine;
+      return lenA - lenB || a.startLine - b.startLine;
+    });
+
+    for (const candidate of sorted) {
+      const proposed = [...selected, [candidate.startLine, candidate.endLine] as [number, number]];
+      const coverage = countCoveredLines(proposed);
+      if (coverage > maxCoverage) continue;
+      selected.push([candidate.startLine, candidate.endLine]);
+      nodes[candidate.index]!.sourceCode = candidate.sourceCode;
+    }
+  }
 
   // 6. Build Edges
   const edges: Edge[] = allEdgesRaw.map((row) => ({
@@ -135,7 +204,7 @@ export async function extractAndBuildPayload(projectRoot: string): Promise<Inges
 
   return {
     repo: '', // to be set by caller
-    branch: '', // to be set by caller
+    version: '', // to be set by caller
     nodes,
     edges,
     files,
