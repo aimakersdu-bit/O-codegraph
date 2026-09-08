@@ -12,7 +12,7 @@ import {
 } from '@colbymchenry/codegraph';
 import { parseQuery, boundedEditDistance } from '@colbymchenry/codegraph/dist/search/query-parser';
 import { kindBonus, nameMatchBonus, scorePathRelevance } from '@colbymchenry/codegraph/dist/search/query-utils';
-import { MysqlDatabase, QueryContext } from './types';
+import { DatabaseLike, QueryContext } from './types';
 
 // Helper to safely parse JSON columns
 function parseJsonColumn(val: any): any {
@@ -96,42 +96,58 @@ function rowToUnresolvedRef(row: any): UnresolvedReference {
 
 export class QueryBuilder {
   constructor(
-    private db: MysqlDatabase,
+    private db: DatabaseLike,
     private ctx: QueryContext
   ) {}
 
+  private nodeUpsertSql(): string {
+    const conflict = `ON CONFLICT(repo, version, version_id, id) DO UPDATE SET
+        kind=excluded.kind, name=excluded.name, qualified_name=excluded.qualified_name,
+        file_path=excluded.file_path, language=excluded.language, start_line=excluded.start_line,
+        end_line=excluded.end_line, start_column=excluded.start_column, end_column=excluded.end_column,
+        docstring=excluded.docstring, signature=excluded.signature, source_code=excluded.source_code,
+        visibility=excluded.visibility, is_exported=excluded.is_exported, is_async=excluded.is_async,
+        is_static=excluded.is_static, is_abstract=excluded.is_abstract, decorators=excluded.decorators,
+        type_parameters=excluded.type_parameters, updated_at=excluded.updated_at`;
+    return `INSERT INTO nodes (
+      id, repo, version, version_id, kind, name, qualified_name, file_path, language,
+      start_line, end_line, start_column, end_column, docstring, signature, source_code, visibility,
+      is_exported, is_async, is_static, is_abstract, decorators, type_parameters, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ${conflict}`;
+  }
+
   /**
-   * Resolves the QueryContext for a given repo and branch.
+   * Resolves the QueryContext for a given repo and version.
    * If versionId is provided, validates that it exists and is not deleting.
    * If versionId is omitted, retrieves the active version.
    */
   static async resolveContext(
-    db: MysqlDatabase,
+    db: DatabaseLike,
     repo: string,
-    branch: string,
+    version: string,
     versionId?: string
   ): Promise<QueryContext> {
     if (versionId) {
       const rows = await db.query(
-        'SELECT version_id FROM version_history WHERE repo=? AND branch=? AND version_id=? AND status != ?',
-        [repo, branch, versionId, 'deleting']
+        'SELECT version_id FROM version_history WHERE repo=? AND version=? AND version_id=? AND status != ?',
+        [repo, version, versionId, 'deleting']
       );
       const row = rows[0];
       if (!row) {
         throw new Error(`Version ${versionId} not found or being deleted`);
       }
-      return { repo, branch, versionId };
+      return { repo, version, versionId };
     }
 
     const rows = await db.query(
-      'SELECT version_id FROM active_versions WHERE repo=? AND branch=?',
-      [repo, branch]
+      'SELECT version_id FROM active_versions WHERE repo=? AND version=?',
+      [repo, version]
     );
     const row = rows[0];
     if (!row) {
-      throw new Error(`No active version for ${repo}@${branch}`);
+      throw new Error(`No active version for ${repo}@${version}`);
     }
-    return { repo, branch, versionId: row.version_id };
+    return { repo, version, versionId: row.version_id };
   }
 
   // ===========================================================================
@@ -150,29 +166,12 @@ export class QueryBuilder {
       return;
     }
 
-    const sql = `
-      INSERT INTO nodes (
-        id, repo, branch, version_id,
-        kind, name, qualified_name, file_path, language,
-        start_line, end_line, start_column, end_column,
-        docstring, signature, source_code, visibility,
-        is_exported, is_async, is_static, is_abstract,
-        decorators, type_parameters, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        kind=VALUES(kind), name=VALUES(name), qualified_name=VALUES(qualified_name),
-        file_path=VALUES(file_path), language=VALUES(language), start_line=VALUES(start_line),
-        end_line=VALUES(end_line), start_column=VALUES(start_column), end_column=VALUES(end_column),
-        docstring=VALUES(docstring), signature=VALUES(signature), source_code=VALUES(source_code),
-        visibility=VALUES(visibility), is_exported=VALUES(is_exported), is_async=VALUES(is_async),
-        is_static=VALUES(is_static), is_abstract=VALUES(is_abstract), decorators=VALUES(decorators),
-        type_parameters=VALUES(type_parameters), updated_at=VALUES(updated_at)
-    `;
+    const sql = this.nodeUpsertSql();
 
     const params = [
       node.id,
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       node.kind,
       node.name,
@@ -199,32 +198,15 @@ export class QueryBuilder {
     await this.db.execute(sql, params);
   }
 
-  async insertNodes(nodes: Node[], nodeSourceCodes?: Map<string, string>): Promise<void> {
+  async insertNodes(nodes: Array<Node & { sourceCode?: string }>, nodeSourceCodes?: Map<string, string>): Promise<void> {
     await this.db.transaction(async (conn) => {
       for (const node of nodes) {
         const sourceCode = nodeSourceCodes?.get(node.id);
-        const sql = `
-          INSERT INTO nodes (
-            id, repo, branch, version_id,
-            kind, name, qualified_name, file_path, language,
-            start_line, end_line, start_column, end_column,
-            docstring, signature, source_code, visibility,
-            is_exported, is_async, is_static, is_abstract,
-            decorators, type_parameters, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON DUPLICATE KEY UPDATE
-            kind=VALUES(kind), name=VALUES(name), qualified_name=VALUES(qualified_name),
-            file_path=VALUES(file_path), language=VALUES(language), start_line=VALUES(start_line),
-            end_line=VALUES(end_line), start_column=VALUES(start_column), end_column=VALUES(end_column),
-            docstring=VALUES(docstring), signature=VALUES(signature), source_code=VALUES(source_code),
-            visibility=VALUES(visibility), is_exported=VALUES(is_exported), is_async=VALUES(is_async),
-            is_static=VALUES(is_static), is_abstract=VALUES(is_abstract), decorators=VALUES(decorators),
-            type_parameters=VALUES(type_parameters), updated_at=VALUES(updated_at)
-        `;
+        const sql = this.nodeUpsertSql();
         const params = [
           node.id,
           this.ctx.repo,
-          this.ctx.branch,
+          this.ctx.version,
           this.ctx.versionId,
           node.kind,
           node.name,
@@ -237,7 +219,7 @@ export class QueryBuilder {
           node.endColumn ?? 0,
           node.docstring ?? null,
           node.signature ?? null,
-          sourceCode ?? null,
+          sourceCode ?? node.sourceCode ?? null,
           node.visibility ?? null,
           node.isExported ? 1 : 0,
           node.isAsync ? 1 : 0,
@@ -260,7 +242,7 @@ export class QueryBuilder {
         docstring = ?, signature = ?, source_code = COALESCE(?, source_code), visibility = ?,
         is_exported = ?, is_async = ?, is_static = ?, is_abstract = ?,
         decorators = ?, type_parameters = ?, updated_at = ?
-      WHERE repo = ? AND branch = ? AND version_id = ? AND id = ?
+      WHERE repo = ? AND version = ? AND version_id = ? AND id = ?
     `;
     const params = [
       node.kind,
@@ -284,7 +266,7 @@ export class QueryBuilder {
       node.typeParameters ? JSON.stringify(node.typeParameters) : null,
       node.updatedAt ?? Date.now(),
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       node.id,
     ];
@@ -293,22 +275,22 @@ export class QueryBuilder {
 
   async deleteNode(id: string): Promise<void> {
     await this.db.execute(
-      'DELETE FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, id]
+      'DELETE FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, id]
     );
   }
 
   async deleteNodesByFile(filePath: string): Promise<void> {
     await this.db.execute(
-      'DELETE FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND file_path = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, filePath]
+      'DELETE FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND file_path = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, filePath]
     );
   }
 
   async getNodeById(id: string): Promise<Node | null> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, id]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, id]
     );
     const row = rows[0];
     return row ? rowToNode(row) : null;
@@ -323,8 +305,8 @@ export class QueryBuilder {
     for (let i = 0; i < ids.length; i += chunkSize) {
       const chunk = ids.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
-      const sql = `SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND id IN (${placeholders})`;
-      const params = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, ...chunk];
+      const sql = `SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND id IN (${placeholders})`;
+      const params = [this.ctx.repo, this.ctx.version, this.ctx.versionId, ...chunk];
       const rows = await this.db.query(sql, params);
       for (const row of rows) {
         map.set(row.id, rowToNode(row));
@@ -335,8 +317,8 @@ export class QueryBuilder {
 
   async getNodesByFile(filePath: string): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND file_path = ? ORDER BY start_line ASC',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, filePath]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND file_path = ? ORDER BY start_line ASC',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, filePath]
     );
     return rows.map(rowToNode);
   }
@@ -345,13 +327,13 @@ export class QueryBuilder {
     const sql = `
       SELECT file_path, COUNT(*) as edge_count
       FROM nodes
-      JOIN edges ON nodes.id = edges.source AND nodes.repo = edges.repo AND nodes.branch = edges.branch AND nodes.version_id = edges.version_id
-      WHERE nodes.repo = ? AND nodes.branch = ? AND nodes.version_id = ?
+      JOIN edges ON nodes.id = edges.source AND nodes.repo = edges.repo AND nodes.version = edges.version AND nodes.version_id = edges.version_id
+      WHERE nodes.repo = ? AND nodes.version = ? AND nodes.version_id = ?
       GROUP BY file_path
       ORDER BY edge_count DESC
       LIMIT 2
     `;
-    const rows = await this.db.query(sql, [this.ctx.repo, this.ctx.branch, this.ctx.versionId]);
+    const rows = await this.db.query(sql, [this.ctx.repo, this.ctx.version, this.ctx.versionId]);
     if (rows.length === 0) return null;
     return {
       filePath: rows[0].file_path,
@@ -363,21 +345,21 @@ export class QueryBuilder {
   async getTopRouteFile(): Promise<{ filePath: string; routeCount: number; totalRoutes: number } | null> {
     const sqlTotal = `
       SELECT COUNT(*) as count FROM nodes
-      WHERE repo = ? AND branch = ? AND version_id = ? AND kind = 'route'
+      WHERE repo = ? AND version = ? AND version_id = ? AND kind = 'route'
     `;
-    const totalRows = await this.db.query(sqlTotal, [this.ctx.repo, this.ctx.branch, this.ctx.versionId]);
+    const totalRows = await this.db.query(sqlTotal, [this.ctx.repo, this.ctx.version, this.ctx.versionId]);
     const totalRoutes = totalRows[0]?.count ?? 0;
     if (totalRoutes === 0) return null;
 
     const sqlTop = `
       SELECT file_path, COUNT(*) as route_count
       FROM nodes
-      WHERE repo = ? AND branch = ? AND version_id = ? AND kind = 'route'
+      WHERE repo = ? AND version = ? AND version_id = ? AND kind = 'route'
       GROUP BY file_path
       ORDER BY route_count DESC
       LIMIT 1
     `;
-    const topRows = await this.db.query(sqlTop, [this.ctx.repo, this.ctx.branch, this.ctx.versionId]);
+    const topRows = await this.db.query(sqlTop, [this.ctx.repo, this.ctx.version, this.ctx.versionId]);
     if (topRows.length === 0) return null;
 
     return {
@@ -399,13 +381,13 @@ export class QueryBuilder {
       SELECT n.id, n.name, n.file_path, n.start_line,
              target.name as controller_name, target.file_path as controller_path
       FROM nodes n
-      LEFT JOIN edges e ON n.id = e.source AND n.repo = e.repo AND n.branch = e.branch AND n.version_id = e.version_id AND e.kind = 'calls'
-      LEFT JOIN nodes target ON e.target = target.id AND e.repo = target.repo AND e.branch = target.branch AND e.version_id = target.version_id
-      WHERE n.repo = ? AND n.branch = ? AND n.version_id = ? AND n.kind = 'route'
+      LEFT JOIN edges e ON n.id = e.source AND n.repo = e.repo AND n.version = e.version AND n.version_id = e.version_id AND e.kind = 'calls'
+      LEFT JOIN nodes target ON e.target = target.id AND e.repo = target.repo AND e.version = target.version AND e.version_id = target.version_id
+      WHERE n.repo = ? AND n.version = ? AND n.version_id = ? AND n.kind = 'route'
       ORDER BY n.name ASC
       LIMIT ?
     `;
-    const rows = await this.db.query(sql, [this.ctx.repo, this.ctx.branch, this.ctx.versionId, limit]);
+    const rows = await this.db.query(sql, [this.ctx.repo, this.ctx.version, this.ctx.versionId, limit]);
     return rows.map(row => ({
       id: row.id,
       name: row.name,
@@ -418,58 +400,58 @@ export class QueryBuilder {
 
   async getNodesByKind(kind: NodeKind): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND kind = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, kind]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND kind = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, kind]
     );
     return rows.map(rowToNode);
   }
 
   async getAllNodes(): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows.map(rowToNode);
   }
 
   async getNodesByName(name: string): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND name = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, name]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND name = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, name]
     );
     return rows.map(rowToNode);
   }
 
   async getNodesByQualifiedNameExact(qualifiedName: string): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND qualified_name = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, qualifiedName]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND qualified_name = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, qualifiedName]
     );
     return rows.map(rowToNode);
   }
 
   async getNodesByLowerName(lowerName: string): Promise<Node[]> {
     const rows = await this.db.query(
-      'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND LOWER(name) = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, lowerName]
+      'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND LOWER(name) = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, lowerName]
     );
     return rows.map(rowToNode);
   }
 
-  // ★ 新增：直接从 MySQL 读取源码
+  // Read the persisted source fragment for a node.
   async getNodeSourceCode(id: string): Promise<string | null> {
     const rows = await this.db.query(
-      'SELECT source_code FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, id]
+      'SELECT source_code FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, id]
     );
     return rows[0]?.source_code ?? null;
   }
 
-  // ★ 新增：列出可用版本（最近 7 个已提交的版本）
+  // List versions available in the snapshot.
   async listVersions(): Promise<Array<{ versionId: string; status: string; createdAt: number }>> {
     const rows = await this.db.query(
-      'SELECT version_id, status, created_at FROM version_history WHERE repo = ? AND branch = ? AND status != ? ORDER BY created_at DESC LIMIT 7',
-      [this.ctx.repo, this.ctx.branch, 'deleting']
+      'SELECT version_id, status, created_at FROM version_history WHERE repo = ? AND version = ? AND status != ? ORDER BY created_at DESC LIMIT 7',
+      [this.ctx.repo, this.ctx.version, 'deleting']
     );
     return rows.map(row => ({
       versionId: row.version_id,
@@ -520,8 +502,8 @@ export class QueryBuilder {
       const maxFtsScore = Math.max(...results.map(r => r.score));
       const terms = query.split(/\s+/).filter(t => t.length >= 2);
       for (const term of terms) {
-        let sql = 'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND name = ?';
-        const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, term];
+        let sql = 'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND name = ?';
+        const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId, term];
         if (kinds && kinds.length > 0) {
           sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
           params.push(...kinds);
@@ -580,8 +562,8 @@ export class QueryBuilder {
     limit: number;
   }): Promise<SearchResult[]> {
     const { kinds, languages, limit } = options;
-    let sql = 'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ?';
-    const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId];
+    let sql = 'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ?';
+    const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId];
     if (kinds && kinds.length > 0) {
       sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
       params.push(...kinds);
@@ -613,23 +595,20 @@ export class QueryBuilder {
     }
 
     const ftsLimit = Math.max(limit * 5, 100);
-
     let sql = `
-      SELECT *, MATCH(name, qualified_name, docstring, signature) AGAINST (? IN BOOLEAN MODE) as score
-      FROM nodes
-      WHERE repo = ? AND branch = ? AND version_id = ?
-        AND MATCH(name, qualified_name, docstring, signature) AGAINST (? IN BOOLEAN MODE)
+      SELECT n.*, -bm25(nodes_fts) AS score
+      FROM nodes_fts
+      JOIN nodes n ON n.id = nodes_fts.node_id
+      WHERE nodes_fts MATCH ? AND n.repo = ? AND n.version = ? AND n.version_id = ?
     `;
-
-    const params: (string | number)[] = [ftsQuery, this.ctx.repo, this.ctx.branch, this.ctx.versionId, ftsQuery];
+    const params: (string | number)[] = [ftsQuery, this.ctx.repo, this.ctx.version, this.ctx.versionId];
 
     if (kinds && kinds.length > 0) {
-      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+      sql += ` AND n.kind IN (${kinds.map(() => '?').join(',')})`;
       params.push(...kinds);
     }
-
     if (languages && languages.length > 0) {
-      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+      sql += ` AND n.language IN (${languages.map(() => '?').join(',')})`;
       params.push(...languages);
     }
 
@@ -640,7 +619,7 @@ export class QueryBuilder {
       const rows = await this.db.query(sql, params);
       return rows.map((row) => ({
         node: rowToNode(row),
-        score: Math.abs(row.score) * 100,
+        score: Math.abs(Number(row.score ?? 0)) * 100,
       }));
     } catch (err) {
       console.error('[CodeGraph] FTS query failed:', err);
@@ -661,7 +640,7 @@ export class QueryBuilder {
           ELSE 0.5
         END as score
       FROM nodes
-      WHERE repo = ? AND branch = ? AND version_id = ?
+      WHERE repo = ? AND version = ? AND version_id = ?
         AND (
           name LIKE ? OR
           qualified_name LIKE ? OR
@@ -679,7 +658,7 @@ export class QueryBuilder {
       contains,
       contains,
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       contains,
       contains,
@@ -729,8 +708,8 @@ export class QueryBuilder {
     const seen = new Set<string>();
     for (const c of cappedCandidates) {
       if (results.length >= limit) break;
-      let sql = 'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND name = ?';
-      const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, c.name];
+      let sql = 'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND name = ?';
+      const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId, c.name];
       if (kinds && kinds.length > 0) {
         sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
         params.push(...kinds);
@@ -759,8 +738,8 @@ export class QueryBuilder {
     const seen = new Set<string>();
 
     const placeholders = names.map(() => '?').join(',');
-    let sql = `SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? AND name IN (${placeholders})`;
-    const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, ...names];
+    let sql = `SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ? AND name IN (${placeholders})`;
+    const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId, ...names];
 
     const rows = await this.db.query(sql, params);
     for (const row of rows) {
@@ -779,8 +758,8 @@ export class QueryBuilder {
   ): Promise<SearchResult[]> {
     if (parts.length === 0) return [];
 
-    let sql = 'SELECT * FROM nodes WHERE repo = ? AND branch = ? AND version_id = ?';
-    const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId];
+    let sql = 'SELECT * FROM nodes WHERE repo = ? AND version = ? AND version_id = ?';
+    const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId];
 
     for (const part of parts) {
       sql += ' AND name LIKE ?';
@@ -805,12 +784,12 @@ export class QueryBuilder {
 
   async insertEdge(edge: Edge): Promise<void> {
     const sql = `
-      INSERT INTO edges (repo, branch, version_id, source, target, kind, metadata, line, col, provenance)
+      INSERT INTO edges (repo, version, version_id, source, target, kind, metadata, line, col, provenance)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       edge.source,
       edge.target,
@@ -827,12 +806,12 @@ export class QueryBuilder {
     await this.db.transaction(async (conn) => {
       for (const edge of edges) {
         const sql = `
-          INSERT INTO edges (repo, branch, version_id, source, target, kind, metadata, line, col, provenance)
+          INSERT INTO edges (repo, version, version_id, source, target, kind, metadata, line, col, provenance)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const params = [
           this.ctx.repo,
-          this.ctx.branch,
+          this.ctx.version,
           this.ctx.versionId,
           edge.source,
           edge.target,
@@ -849,14 +828,14 @@ export class QueryBuilder {
 
   async deleteEdgesBySource(sourceId: string): Promise<void> {
     await this.db.execute(
-      'DELETE FROM edges WHERE repo = ? AND branch = ? AND version_id = ? AND source = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, sourceId]
+      'DELETE FROM edges WHERE repo = ? AND version = ? AND version_id = ? AND source = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, sourceId]
     );
   }
 
   async getOutgoingEdges(sourceId: string, kinds?: EdgeKind[], provenance?: string): Promise<Edge[]> {
-    let sql = 'SELECT * FROM edges WHERE repo = ? AND branch = ? AND version_id = ? AND source = ?';
-    const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, sourceId];
+    let sql = 'SELECT * FROM edges WHERE repo = ? AND version = ? AND version_id = ? AND source = ?';
+    const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId, sourceId];
 
     if (kinds && kinds.length > 0) {
       sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
@@ -872,8 +851,8 @@ export class QueryBuilder {
   }
 
   async getIncomingEdges(targetId: string, kinds?: EdgeKind[]): Promise<Edge[]> {
-    let sql = 'SELECT * FROM edges WHERE repo = ? AND branch = ? AND version_id = ? AND target = ?';
-    const params: (string | number)[] = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, targetId];
+    let sql = 'SELECT * FROM edges WHERE repo = ? AND version = ? AND version_id = ? AND target = ?';
+    const params: (string | number)[] = [this.ctx.repo, this.ctx.version, this.ctx.versionId, targetId];
 
     if (kinds && kinds.length > 0) {
       sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
@@ -889,13 +868,13 @@ export class QueryBuilder {
     const placeholders = nodeIds.map(() => '?').join(',');
     let sql = `
       SELECT * FROM edges
-      WHERE repo = ? AND branch = ? AND version_id = ?
+      WHERE repo = ? AND version = ? AND version_id = ?
         AND source IN (${placeholders})
         AND target IN (${placeholders})
     `;
     const params: any[] = [
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       ...nodeIds,
       ...nodeIds,
@@ -917,18 +896,17 @@ export class QueryBuilder {
   async upsertFile(file: FileRecord): Promise<void> {
     const sql = `
       INSERT INTO files (
-        path, repo, branch, version_id,
-        content_hash, language, size, modified_at, indexed_at, node_count, errors
+        path, repo, version, version_id, content_hash, language, size, modified_at, indexed_at, node_count, errors
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        content_hash = VALUES(content_hash), language = VALUES(language), size = VALUES(size),
-        modified_at = VALUES(modified_at), indexed_at = VALUES(indexed_at),
-        node_count = VALUES(node_count), errors = VALUES(errors)
+      ON CONFLICT(repo, version, version_id, path) DO UPDATE SET
+        content_hash=excluded.content_hash, language=excluded.language, size=excluded.size,
+        modified_at=excluded.modified_at, indexed_at=excluded.indexed_at,
+        node_count=excluded.node_count, errors=excluded.errors
     `;
     const params = [
       file.path,
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       file.contentHash,
       file.language,
@@ -943,15 +921,15 @@ export class QueryBuilder {
 
   async deleteFile(filePath: string): Promise<void> {
     await this.db.execute(
-      'DELETE FROM files WHERE repo = ? AND branch = ? AND version_id = ? AND path = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, filePath]
+      'DELETE FROM files WHERE repo = ? AND version = ? AND version_id = ? AND path = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, filePath]
     );
   }
 
   async getFileByPath(filePath: string): Promise<FileRecord | null> {
     const rows = await this.db.query(
-      'SELECT * FROM files WHERE repo = ? AND branch = ? AND version_id = ? AND path = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, filePath]
+      'SELECT * FROM files WHERE repo = ? AND version = ? AND version_id = ? AND path = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, filePath]
     );
     const row = rows[0];
     return row ? rowToFileRecord(row) : null;
@@ -959,8 +937,8 @@ export class QueryBuilder {
 
   async getAllFiles(): Promise<FileRecord[]> {
     const rows = await this.db.query(
-      'SELECT * FROM files WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT * FROM files WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows.map(rowToFileRecord);
   }
@@ -980,12 +958,12 @@ export class QueryBuilder {
   async insertUnresolvedRef(ref: UnresolvedReference): Promise<void> {
     const sql = `
       INSERT INTO unresolved_refs (
-        repo, branch, version_id, from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language
+        repo, version, version_id, from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       ref.fromNodeId,
       ref.referenceName,
@@ -1004,12 +982,12 @@ export class QueryBuilder {
       for (const ref of refs) {
         const sql = `
           INSERT INTO unresolved_refs (
-            repo, branch, version_id, from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language
+            repo, version, version_id, from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const params = [
           this.ctx.repo,
-          this.ctx.branch,
+          this.ctx.version,
           this.ctx.versionId,
           ref.fromNodeId,
           ref.referenceName,
@@ -1027,55 +1005,55 @@ export class QueryBuilder {
 
   async deleteUnresolvedByNode(nodeId: string): Promise<void> {
     await this.db.execute(
-      'DELETE FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ? AND from_node_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, nodeId]
+      'DELETE FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ? AND from_node_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, nodeId]
     );
   }
 
   async getUnresolvedByName(name: string): Promise<UnresolvedReference[]> {
     const rows = await this.db.query(
-      'SELECT * FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ? AND reference_name = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, name]
+      'SELECT * FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ? AND reference_name = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, name]
     );
     return rows.map(rowToUnresolvedRef);
   }
 
   async getUnresolvedReferences(): Promise<UnresolvedReference[]> {
     const rows = await this.db.query(
-      'SELECT * FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT * FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows.map(rowToUnresolvedRef);
   }
 
   async getUnresolvedReferencesCount(): Promise<number> {
     const rows = await this.db.query(
-      'SELECT COUNT(*) as count FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT COUNT(*) as count FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows[0]?.count ?? 0;
   }
 
   async getUnresolvedReferencesBatch(offset: number, limit: number): Promise<UnresolvedReference[]> {
     const rows = await this.db.query(
-      'SELECT * FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ? LIMIT ? OFFSET ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, limit, offset]
+      'SELECT * FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ? LIMIT ? OFFSET ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, limit, offset]
     );
     return rows.map(rowToUnresolvedRef);
   }
 
   async getAllFilePaths(): Promise<string[]> {
     const rows = await this.db.query(
-      'SELECT DISTINCT path FROM files WHERE repo = ? AND branch = ? AND version_id = ? ORDER BY path ASC',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT DISTINCT path FROM files WHERE repo = ? AND version = ? AND version_id = ? ORDER BY path ASC',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows.map(row => row.path);
   }
 
   async getAllNodeNames(): Promise<string[]> {
     const rows = await this.db.query(
-      'SELECT DISTINCT name FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? ORDER BY name ASC',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT DISTINCT name FROM nodes WHERE repo = ? AND version = ? AND version_id = ? ORDER BY name ASC',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return rows.map(row => row.name);
   }
@@ -1085,17 +1063,17 @@ export class QueryBuilder {
     const placeholders = filePaths.map(() => '?').join(',');
     const sql = `
       SELECT * FROM unresolved_refs
-      WHERE repo = ? AND branch = ? AND version_id = ? AND file_path IN (${placeholders})
+      WHERE repo = ? AND version = ? AND version_id = ? AND file_path IN (${placeholders})
     `;
-    const params = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, ...filePaths];
+    const params = [this.ctx.repo, this.ctx.version, this.ctx.versionId, ...filePaths];
     const rows = await this.db.query(sql, params);
     return rows.map(rowToUnresolvedRef);
   }
 
   async clearUnresolvedReferences(): Promise<void> {
     await this.db.execute(
-      'DELETE FROM unresolved_refs WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'DELETE FROM unresolved_refs WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
   }
 
@@ -1104,9 +1082,9 @@ export class QueryBuilder {
     const placeholders = fromNodeIds.map(() => '?').join(',');
     const sql = `
       DELETE FROM unresolved_refs
-      WHERE repo = ? AND branch = ? AND version_id = ? AND from_node_id IN (${placeholders})
+      WHERE repo = ? AND version = ? AND version_id = ? AND from_node_id IN (${placeholders})
     `;
-    const params = [this.ctx.repo, this.ctx.branch, this.ctx.versionId, ...fromNodeIds];
+    const params = [this.ctx.repo, this.ctx.version, this.ctx.versionId, ...fromNodeIds];
     await this.db.execute(sql, params);
   }
 
@@ -1120,12 +1098,12 @@ export class QueryBuilder {
       for (const ref of refs) {
         const sql = `
           DELETE FROM unresolved_refs
-          WHERE repo = ? AND branch = ? AND version_id = ?
+          WHERE repo = ? AND version = ? AND version_id = ?
             AND from_node_id = ? AND reference_name = ? AND reference_kind = ?
         `;
         const params = [
           this.ctx.repo,
-          this.ctx.branch,
+          this.ctx.version,
           this.ctx.versionId,
           ref.fromNodeId,
           ref.referenceName,
@@ -1142,12 +1120,12 @@ export class QueryBuilder {
 
   async getNodeAndEdgeCount(): Promise<{ nodes: number; edges: number }> {
     const nodeRows = await this.db.query(
-      'SELECT COUNT(*) as count FROM nodes WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT COUNT(*) as count FROM nodes WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const edgeRows = await this.db.query(
-      'SELECT COUNT(*) as count FROM edges WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT COUNT(*) as count FROM edges WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     return {
       nodes: nodeRows[0]?.count ?? 0,
@@ -1159,14 +1137,14 @@ export class QueryBuilder {
     const { nodes, edges } = await this.getNodeAndEdgeCount();
     
     const fileRows = await this.db.query(
-      'SELECT COUNT(*) as count FROM files WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT COUNT(*) as count FROM files WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const files = fileRows[0]?.count ?? 0;
 
     const kindRows = await this.db.query(
-      'SELECT kind, COUNT(*) as count FROM nodes WHERE repo = ? AND branch = ? AND version_id = ? GROUP BY kind',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT kind, COUNT(*) as count FROM nodes WHERE repo = ? AND version = ? AND version_id = ? GROUP BY kind',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const nodesByKind: Record<string, number> = {};
     for (const row of kindRows) {
@@ -1174,8 +1152,8 @@ export class QueryBuilder {
     }
 
     const edgeKindRows = await this.db.query(
-      'SELECT kind, COUNT(*) as count FROM edges WHERE repo = ? AND branch = ? AND version_id = ? GROUP BY kind',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT kind, COUNT(*) as count FROM edges WHERE repo = ? AND version = ? AND version_id = ? GROUP BY kind',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const edgesByKind: Record<string, number> = {};
     for (const row of edgeKindRows) {
@@ -1183,8 +1161,8 @@ export class QueryBuilder {
     }
 
     const languageRows = await this.db.query(
-      'SELECT language, COUNT(*) as count FROM files WHERE repo = ? AND branch = ? AND version_id = ? GROUP BY language',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT language, COUNT(*) as count FROM files WHERE repo = ? AND version = ? AND version_id = ? GROUP BY language',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const filesByLanguage: Record<string, number> = {};
     for (const row of languageRows) {
@@ -1205,21 +1183,22 @@ export class QueryBuilder {
 
   async getMetadata(key: string): Promise<string | null> {
     const rows = await this.db.query(
-      'SELECT value FROM project_metadata WHERE repo = ? AND branch = ? AND version_id = ? AND `key` = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId, key]
+      'SELECT value FROM project_metadata WHERE repo = ? AND version = ? AND version_id = ? AND `key` = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId, key]
     );
     return rows[0]?.value ?? null;
   }
 
   async setMetadata(key: string, value: string): Promise<void> {
     const sql = `
-      INSERT INTO project_metadata (repo, branch, version_id, \`key\`, value, updated_at)
+      INSERT INTO project_metadata (repo, version, version_id, key, value, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)
+      ON CONFLICT(repo, version, version_id, key) DO UPDATE SET
+        value=excluded.value, updated_at=excluded.updated_at
     `;
     const params = [
       this.ctx.repo,
-      this.ctx.branch,
+      this.ctx.version,
       this.ctx.versionId,
       key,
       value,
@@ -1230,8 +1209,8 @@ export class QueryBuilder {
 
   async getAllMetadata(): Promise<Record<string, string>> {
     const rows = await this.db.query(
-      'SELECT `key`, value FROM project_metadata WHERE repo = ? AND branch = ? AND version_id = ?',
-      [this.ctx.repo, this.ctx.branch, this.ctx.versionId]
+      'SELECT `key`, value FROM project_metadata WHERE repo = ? AND version = ? AND version_id = ?',
+      [this.ctx.repo, this.ctx.version, this.ctx.versionId]
     );
     const metadata: Record<string, string> = {};
     for (const row of rows) {

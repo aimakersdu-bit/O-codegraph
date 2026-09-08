@@ -5,13 +5,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('dist/schema',{recursive:true});fs.copyFileSync('src/schema/001_init.sql','dist/schema/001_init.sql')\"",
+    "build": "tsc",
     "test": "vitest run"
   },
   "dependencies": {
-    "@colbymchenry/codegraph": "file:../..",
-    "mysql2": "^3.11.5",
-    "uuid": "^9.0.1"
+    "@colbymchenry/codegraph": "file:../.."
   },
   "devDependencies": {
     "@types/node": "^20.19.30",

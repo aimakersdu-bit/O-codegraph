@@ -1,21 +1,23 @@
 import { Router } from 'express';
-import { MysqlDatabase } from '@codegraph/shared';
+import * as fs from 'fs';
+import { getDbRoot } from '../services/sqlite-locator';
 
-export function createHealthRouter(db: MysqlDatabase): Router {
+export function createHealthRouter(): Router {
   const router = Router();
 
   router.get('/health', async (_req, res) => {
     try {
-      // Run a simple query to verify database connection
-      await db.query('SELECT 1');
+      const root = getDbRoot();
+      const exists = fs.existsSync(root);
       return res.json({
         status: 'ok',
-        database: 'connected',
+        database: exists ? 'ready' : 'missing',
+        root,
       });
     } catch (err: any) {
       return res.status(500).json({
         status: 'error',
-        database: 'disconnected',
+        database: 'error',
         error: err.message || 'Database connection failed',
       });
     }

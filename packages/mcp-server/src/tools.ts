@@ -5,9 +5,9 @@ const repoProperty = {
   description: 'Repository identifier (e.g., "org/project")',
 };
 
-const branchProperty = {
+const versionProperty = {
   type: 'string',
-  description: 'Branch name (e.g., "main")',
+  description: 'CodeGraph export version (e.g., "260827.1.0.2233")',
 };
 
 const versionIdProperty = {
@@ -23,7 +23,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         query: {
           type: 'string',
@@ -39,7 +39,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum results (default: 10)',
         },
       },
-      required: ['repo', 'branch', 'query'],
+      required: ['repo', 'version', 'query'],
     },
   },
   {
@@ -49,7 +49,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         symbol: {
           type: 'string',
@@ -60,7 +60,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of callers to return (default: 20)',
         },
       },
-      required: ['repo', 'branch', 'symbol'],
+      required: ['repo', 'version', 'symbol'],
     },
   },
   {
@@ -70,7 +70,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         symbol: {
           type: 'string',
@@ -81,7 +81,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of callees to return (default: 20)',
         },
       },
-      required: ['repo', 'branch', 'symbol'],
+      required: ['repo', 'version', 'symbol'],
     },
   },
   {
@@ -91,7 +91,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         symbol: {
           type: 'string',
@@ -102,7 +102,7 @@ export const tools: ToolDefinition[] = [
           description: 'How many levels of dependencies to traverse (default: 2)',
         },
       },
-      required: ['repo', 'branch', 'symbol'],
+      required: ['repo', 'version', 'symbol'],
     },
   },
   {
@@ -112,7 +112,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         symbol: {
           type: 'string',
@@ -131,7 +131,7 @@ export const tools: ToolDefinition[] = [
           description: 'Optional: disambiguate to the definition at/around this line.',
         },
       },
-      required: ['repo', 'branch', 'symbol'],
+      required: ['repo', 'version', 'symbol'],
     },
   },
   {
@@ -141,7 +141,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         query: {
           type: 'string',
@@ -152,7 +152,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of files to include source code from (default: 12)',
         },
       },
-      required: ['repo', 'branch', 'query'],
+      required: ['repo', 'version', 'query'],
     },
   },
   {
@@ -162,10 +162,10 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
       },
-      required: ['repo', 'branch'],
+      required: ['repo', 'version'],
     },
   },
   {
@@ -175,7 +175,7 @@ export const tools: ToolDefinition[] = [
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
         version_id: versionIdProperty,
         path: {
           type: 'string',
@@ -199,19 +199,19 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum directory depth to show (default: unlimited)',
         },
       },
-      required: ['repo', 'branch'],
+      required: ['repo', 'version'],
     },
   },
   {
     name: 'codegraph_versions',
-    description: 'List the available versions for the repository and branch (up to recent 7 versions).',
+    description: 'List the available internal export versions for the repository and external version.',
     inputSchema: {
       type: 'object',
       properties: {
         repo: repoProperty,
-        branch: branchProperty,
+        version: versionProperty,
       },
-      required: ['repo', 'branch'],
+      required: ['repo', 'version'],
     },
   },
 ];

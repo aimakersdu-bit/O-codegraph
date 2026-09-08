@@ -1,38 +1,49 @@
 import { Router } from 'express';
-import { MysqlDatabase, QueryBuilder } from '@codegraph/shared';
-import { VersionCleaner } from '../services/cleaner';
+import * as fs from 'fs';
+import { SqliteDatabaseImpl } from '@codegraph/shared';
+import { getDbRoot, listDbFiles, resolveDbPath } from '../services/sqlite-locator';
+import { openQueryBuilder } from '../services/sqlite-query';
 
-export function createVersionsRouter(db: MysqlDatabase): Router {
+export function createVersionsRouter(): Router {
   const router = Router();
-  const cleaner = new VersionCleaner(db);
 
   // GET /api/v1/versions
   router.get('/versions', async (req, res) => {
     try {
-      const { repo, branch } = req.query;
-      if (!repo || !branch) {
-        const rows = await db.query(
-          'SELECT repo, branch, version_id, status, created_at FROM version_history WHERE status != ? ORDER BY created_at DESC',
-          ['deleting']
-        );
-        return res.json(
-          rows.map((row) => ({
-            repo: row.repo,
-            branch: row.branch,
-            versionId: row.version_id,
-            status: row.status,
-            createdAt: Number(row.created_at),
-          }))
-        );
+      const { repo, version } = req.query;
+      if (!repo || !version) {
+        const rows: Array<{ repo: string; version: string; versionId: string; status: string; createdAt: number }> = [];
+        for (const file of listDbFiles(getDbRoot())) {
+          const db = new SqliteDatabaseImpl(file);
+          try {
+            const metaRows = await db.query(
+              'SELECT repo, version, version_id, status, created_at FROM version_history ORDER BY created_at DESC LIMIT 1'
+            );
+            const row = metaRows[0];
+            if (row) {
+              rows.push({
+                repo: row.repo,
+                version: row.version,
+                versionId: row.version_id,
+                status: row.status,
+                createdAt: Number(row.created_at),
+              });
+            }
+          } finally {
+            await db.close();
+          }
+        }
+        rows.sort((a, b) => b.createdAt - a.createdAt);
+        return res.json(rows);
       }
 
-      const qb = new QueryBuilder(db, {
-        repo: String(repo),
-        branch: String(branch),
-        versionId: '',
-      });
-      const list = await qb.listVersions();
-      return res.json(list);
+      const { db, qb } = await openQueryBuilder(String(repo), String(version));
+      try {
+        const list = await qb.listVersions();
+        return res.json(list);
+      } finally {
+        await db.close();
+      }
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Internal server error' });
     }
@@ -42,19 +53,19 @@ export function createVersionsRouter(db: MysqlDatabase): Router {
   router.get('/versions/:versionId/stats', async (req, res) => {
     try {
       const { versionId } = req.params;
-      const { repo, branch } = req.query;
-      if (!repo || !branch) {
-        return res.status(400).json({ error: 'Missing query parameters: repo, branch' });
+      const { repo, version } = req.query;
+      const externalVersion = String(version || versionId);
+      if (!repo || !externalVersion) {
+        return res.status(400).json({ error: 'Missing query parameters: repo, version' });
       }
 
-      const qb = new QueryBuilder(db, {
-        repo: String(repo),
-        branch: String(branch),
-        versionId: String(versionId),
-      });
-
-      const stats = await qb.getStats();
-      return res.json(stats);
+      const { db, qb } = await openQueryBuilder(String(repo), externalVersion);
+      try {
+        const stats = await qb.getStats();
+        return res.json(stats);
+      } finally {
+        await db.close();
+      }
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Internal server error' });
     }
@@ -64,12 +75,21 @@ export function createVersionsRouter(db: MysqlDatabase): Router {
   router.delete('/versions/:versionId', async (req, res) => {
     try {
       const { versionId } = req.params;
-      const { repo, branch } = req.query;
-      if (!repo || !branch) {
-        return res.status(400).json({ error: 'Missing query parameters: repo, branch' });
+      const { repo, version } = req.query;
+      const externalVersion = String(version || versionId);
+      if (!repo || !externalVersion) {
+        return res.status(400).json({ error: 'Missing query parameters: repo, version' });
       }
 
-      await cleaner.deleteSpecificVersion(String(repo), String(branch), String(versionId));
+      const repoStr = String(repo);
+      const versionStr = externalVersion;
+      const dbPath = resolveDbPath(repoStr, versionStr);
+      const { db } = await openQueryBuilder(repoStr, versionStr);
+      await db.close();
+      await fs.promises.rm(dbPath, { force: true });
+      await fs.promises.rm(`${dbPath}-wal`, { force: true });
+      await fs.promises.rm(`${dbPath}-shm`, { force: true });
+      await fs.promises.rm(`${dbPath}-journal`, { force: true });
       return res.json({ success: true });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Internal server error' });
